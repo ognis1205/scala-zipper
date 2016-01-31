@@ -84,7 +84,19 @@ trait ZipperContext {
   })
 
   /**
-    * Maps the current [[ZipperContext]] to the downwords.
+    * Maps the current [[ZipperContext]] to the upwards.
+    * @return the upwised zipper context.
+    */
+  def up: ZipperContext = ancestors match {
+    case (parentLeftSiblings, parent, parentRightSiblings) #:: grandAncestors =>
+      val jValue = contextToJSON(focus, leftSiblings, rightSiblings, parent)
+      ZipperContext(JNode.copy(parent, jValue), parentLeftSiblings, parentRightSiblings, grandAncestors)
+    case Stream.Empty =>
+      ZipperContext.Empty
+  }
+
+  /**
+    * Maps the current [[ZipperContext]] to the downwards.
     * @return the downwised zipper context.
     */
   def down: ZipperContext = focus.value match {
@@ -93,12 +105,38 @@ trait ZipperContext {
       case (key, value) :: tail => ZipperContext(
         JNode(key, value),
         Stream.empty,
-
+        fieldsToRightSiblings(tail),
+        (leftSiblings, focus, rightSiblings) #:: ancestors
       )
     }
-    case jArray(values)  => values.toList match {
+    case JArray(values)  => values.toList match {
+      case Nil          => ZipperContext.Empty
+      case head :: tail => ZipperContext(
+        JNode(head),
+        Stream.empty,
+        valuesToRightSiblings(tail),
+        (leftSiblings, focus, rightSiblings) #:: ancestors
+      )
     }
-    case value           => 
+    case value           => ZipperContext.Empty
+  }
+
+  /**
+    * Maps the current [[ZipperContext]] to the leftwards.
+    * @return the leftwised zipper context.
+    */
+  def left: ZipperContext = leftSiblings match {
+    case head #:: tail => ZipperContext(head, tail, focus #:: rightSiblings, ancestors)
+    case Stream.Empty  => ZipperContext.Empty
+  }
+
+  /**
+    * Maps the current [[ZipperContext]] to the rightwards.
+    * @return the rightwised zipper context.
+    */
+  def right: ZipperContext = rightSiblings match {
+    case head #:: tail => ZipperContext(headm focus #:: leftSiblings, tail, ancestors)
+    case Stream.Empty  => ZipperContext.Empty
   }
 }
 
@@ -160,15 +198,7 @@ trait HasError extends ZipperContext {
   * This trait specifies the extending class has JSON zipper operations.
   * @author Shingo OKAWA
   */
-trait ZipperOperations {
-  // PLACEHOLDER.
-}
-
-/**
-  * This object is responsible for providing basic functionalities of the context within JSON zipper modad.
-  * @author Shingo OKAWA
-  */
-object ZipperContext extends ZipperOperations {
+trait WithIntermediateDataTypes {
   /** Aliases [[Stream[JNode]]] as zipper node [[Siblings]]. */
   type Siblings = Stream[JNode]
 
@@ -178,6 +208,100 @@ object ZipperContext extends ZipperOperations {
   /** Aliases [[Stream[Ancestor]]] as zipper node [[Ancestors]]. */
   type Ancestors = Stream[Ancestor]
 
+  /**
+    * Maps [[Seq[(String, JValue)]]] into right [[Siblings]].
+    * @param  fields the JSON fields to be rendered.
+    * @return the corresponding [[Stream[JNode]]] instance.
+    */
+  def fieldsToRightSiblings(fields: Seq[(String, JValue)]) = {
+    def loop(fields: Seq[(String, JValue)]): Siblings = fields match {
+      case Nil          => Stream.empty
+      case head :: tail => JNode(head._1, head._2) #:: loop(tail)
+    }
+    loop(fields)
+  }
+
+  /**
+    * Maps [[Seq[JValue]]] into right [[Siblings]].
+    * @param  values the JSON values to be rendered.
+    * @return the corresponding [[Stream[JNode]]] instance.
+    */
+  def valuesToRightSiblings(values: Seq[JValue]) = {
+    def loop(values: Seq[JValue]): Siblings = values match {
+      case Nil          => Stream.empty
+      case head :: tail => JNode(head) #:: loop(tail)
+    }
+    loop(elements)
+  }
+
+  /**
+    * Maps left [[Siblngs]] into [[JObject]].
+    * @param  sibling the left siblings to be rendered.
+    * @return the corresponding [[JObject]] instance.
+    */
+  def leftSiblingsToFields(siblings: Siblings): JObject = JObject(
+    siblings.foldLeft(Seq[(String, JValue)]()) { (accumulator, sibling) => sibling match {
+      case FieldJNode(key, value) => (key -> value) +: accumulator
+      case _                      => accumulator
+    }}
+  )
+
+  /**
+    * Maps right [[Siblngs]] into [[JObject]].
+    * @param  sibling the right siblings to be rendered.
+    * @return the corresponding [[JObject]] instance.
+    */
+  def rightSiblingsToFields(siblings: Siblings): JObject = JObject(
+    siblings.foldLeft(Seq[(String, JValue)]()) { (accumulator, sibling) => sibling match {
+      case FieldJNode(key, value) => accumulator :+ (key -> value)
+      case _                      => accumulator
+    }}
+  )
+
+  /**
+    * Maps left [[Siblngs]] into [[JArray]].
+    * @param  sibling the left siblings to be rendered.
+    * @return the corresponding [[JArray]] instance.
+    */
+  def leftSiblingsToValues(siblings: Siblings): JArray = JArray(
+    siblings.foldLeft(Seq[JValue]()) { (accumulator, sibling) => sibling match {
+      case ValueJNode(value) => value +: accumulator
+      case _                 => accumulator
+    }}
+  )
+
+  /**
+    * Maps right [[Siblngs]] into [[JArray]].
+    * @param  sibling the right siblings to be rendered.
+    * @return the corresponding [[JArray]] instance.
+    */
+  def rightSiblingsToValues(siblings: Siblings): JArray = JArray(
+    siblings.foldLeft(Seq[JValue]()) { (accumulator, sibling) => sibling match {
+      case ValueJNode(value) => accumulator :+ value
+      case _                 => accumulator
+    }}
+  )
+
+  /**
+    * Maps zipper context into [[JValue]].
+    * @param  node the target node to be rendered.
+    * @param  leftSiblings the target node's left siblings.
+    * @param  rightSiblings the target node's right siblings.
+    * @param  parent the target node's parent.
+    * @return the corresponding [[JValue]] instance.
+    */
+  def contextToJSON(node: JNode, leftSiblings: Siblings, rightSiblings: Siblings, parent: JNode): JValue = (parent.value, node) match {
+    case (JObject(_), FieldJNode(key, value)) => (leftSiblingsToFields(leftSiblings) :+ (key -> value)) ++ rightSiblingsToFields(rightSiblings)
+    case (JArray(_), ValueJNode(value))       => (leftSiblingsToValues(leftSiblings) :+ value) ++ rightSiblingsToValues(rightSiblings)
+    case _                                    => throw new RuntimeException("could not resolve zipper context.")
+  }
+}
+
+/**
+  * This object is responsible for providing basic functionalities of the context within JSON zipper modad.
+  * @author Shingo OKAWA
+  */
+object ZipperContext extends WithIntermediateDataTypes {
   /** The empty context terminal object. */
   case object Empty extends IsEmpty
 
@@ -219,17 +343,4 @@ object ZipperContext extends ZipperOperations {
     */
   def unapply(context: ZipperContext): Option[(JNode, Siblings, Siblings, Ancestors)] =
     Some((context.focus, context.leftSiblings, context.rightSiblings, context.ancestors))
-
-  /**
-    * Maps [[(String, JValue)]] into [[JNode]].
-    * @param  context the [[ZipperContext]] to be unwrapped.
-    * @return the corresponding [[Stream[JNode]]] instance.
-    */
-  def objectsToStream(objects: Seq[(String, JValue)]) = {
-    def loop(objects: Seq[(String, JValue)]): Siblings = objects match {
-      case Nil          => Stream.empty
-      case head :: tail => JNode(head._1, head._2) #:: loop(tail)
-    }
-    loop(elements)
-  }
 }
